@@ -51,6 +51,8 @@ class FetchResult:
     method: str
     status_code: int | None
     markdown: str
+    media_url: str
+    cover_url: str
     errors: list[str]
 
     @property
@@ -185,6 +187,52 @@ def _dedupe_candidates(candidates: list[str]) -> str:
     return "\n\n".join(unique)
 
 
+def _extract_toutiao_video(page: Any) -> dict[str, str]:
+    """Extract public Toutiao video metadata from the page's RENDER_DATA block."""
+    try:
+        raw = page.css('script#RENDER_DATA::text').get()
+        if not raw:
+            return {}
+        data = json.loads(urllib.parse.unquote(str(raw)))
+        root = data.get("data") or {}
+        video = root.get("initialVideo") or {}
+        item_cell = video.get("itemCell") or {}
+        user = item_cell.get("userInfo") or {}
+        play_info = video.get("videoPlayInfo") or {}
+        video_list = play_info.get("video_list") or {}
+
+        candidates: list[dict[str, Any]] = []
+        if isinstance(video_list, dict):
+            candidates = [v for v in video_list.values() if isinstance(v, dict)]
+        elif isinstance(video_list, list):
+            candidates = [v for v in video_list if isinstance(v, dict)]
+
+        candidates.sort(
+            key=lambda x: (
+                int(x.get("vheight") or x.get("height") or 0),
+                int(x.get("vwidth") or x.get("width") or 0),
+                int(x.get("size") or 0),
+            ),
+            reverse=True,
+        )
+        media_url = ""
+        for item in candidates:
+            url = item.get("main_url") or item.get("backup_url_1") or item.get("backup_url")
+            if url:
+                media_url = str(url)
+                break
+
+        return {
+            "title": _clean(video.get("title")),
+            "author": _clean(user.get("name")),
+            "cover_url": _clean(video.get("coverUrl")),
+            "media_url": _clean(media_url),
+            "item_id": _clean(root.get("itemId")),
+        }
+    except Exception:
+        return {}
+
+
 def _extract_embedded_json_text(page: Any) -> str:
     candidates: list[str] = []
     scripts: list[tuple[str, bool]] = []
@@ -231,6 +279,9 @@ def _extract_xhr_text(page: Any) -> str:
 
 def _result_from_page(url: str, page: Any, method: str, errors: list[str]) -> FetchResult:
     title, author, published = _metadata(page)
+    toutiao = _extract_toutiao_video(page) if "toutiao.com" in urlparse(url).netloc.lower() else {}
+    title = toutiao.get("title") or title
+    author = toutiao.get("author") or author
     try:
         markdown = page.markdown(main_content_only=True) or ""
     except Exception as exc:
@@ -274,6 +325,8 @@ def _result_from_page(url: str, page: Any, method: str, errors: list[str]) -> Fe
         method=method,
         status_code=getattr(page, "status", None),
         markdown=markdown,
+        media_url=toutiao.get("media_url", ""),
+        cover_url=toutiao.get("cover_url", ""),
         errors=errors.copy(),
     )
 
@@ -334,5 +387,7 @@ def fetch_url(url: str) -> FetchResult:
         method="failed",
         status_code=None,
         markdown="",
+        media_url="",
+        cover_url="",
         errors=errors,
     )
