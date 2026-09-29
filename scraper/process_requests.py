@@ -63,6 +63,8 @@ status: {"fetched" if result.get("ok") else "failed"}
 - Published: {result.get("published_at") or "unknown"}
 - Fetch method: {result.get("method") or "failed"}
 - HTTP status: {safe_text(result.get("status_code")) or "unknown"}
+- Media URL: {result.get("media_url") or "unknown"}
+- Cover URL: {result.get("cover_url") or "unknown"}
 
 ## Fetch notes
 
@@ -114,6 +116,8 @@ def main() -> None:
                 "method": "failed",
                 "status_code": None,
                 "markdown": "",
+                "media_url": "",
+                "cover_url": "",
                 "errors": [f"{type(exc).__name__}: {exc}"],
                 "ok": False,
             }
