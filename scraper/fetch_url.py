@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import html
 import json
 import re
 import socket
+import urllib.parse
 from dataclasses import asdict, dataclass
 from ipaddress import ip_address
 from typing import Any
@@ -29,11 +31,13 @@ CONTENT_KEYS = {
     "text",
     "article_content",
     "rich_content",
+    "articlebody",
     "body",
     "description",
     "abstract",
     "summary",
     "title",
+    "name",
 }
 
 
@@ -147,20 +151,68 @@ def _quality(markdown: str) -> bool:
     return True
 
 
+def _normalize_candidate(value: str) -> str:
+    value = html.unescape(value)
+    if "<" in value and ">" in value:
+        value = re.sub(r"<[^>]+>", " ", value)
+    return _clean(value)
+
+
+def _collect_text_candidates(value: Any, candidates: list[str], key: str = "") -> None:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _collect_text_candidates(v, candidates, str(k).lower())
+    elif isinstance(value, list):
+        for item in value:
+            _collect_text_candidates(item, candidates, key)
+    elif isinstance(value, str):
+        s = _normalize_candidate(value)
+        if len(s) >= 40 and (key in CONTENT_KEYS or len(s) >= 500):
+            candidates.append(s)
+
+
+def _dedupe_candidates(candidates: list[str]) -> str:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for text in sorted(candidates, key=len, reverse=True):
+        fingerprint = text[:240]
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique.append(text)
+        if len(unique) >= 12:
+            break
+    return "\n\n".join(unique)
+
+
+def _extract_embedded_json_text(page: Any) -> str:
+    candidates: list[str] = []
+    scripts: list[tuple[str, bool]] = []
+
+    for selector, encoded in (
+        ('script#RENDER_DATA::text', True),
+        ('script[type="application/ld+json"]::text', False),
+    ):
+        try:
+            values = page.css(selector).getall()
+        except Exception:
+            values = []
+        for raw in values or []:
+            scripts.append((str(raw), encoded))
+
+    for raw, encoded in scripts:
+        try:
+            text = urllib.parse.unquote(raw) if encoded else raw
+            data = json.loads(text)
+            _collect_text_candidates(data, candidates)
+        except Exception:
+            continue
+
+    return _dedupe_candidates(candidates)
+
+
 def _extract_xhr_text(page: Any) -> str:
     candidates: list[str] = []
-
-    def walk(value: Any, key: str = "") -> None:
-        if isinstance(value, dict):
-            for k, v in value.items():
-                walk(v, str(k).lower())
-        elif isinstance(value, list):
-            for item in value:
-                walk(item, key)
-        elif isinstance(value, str):
-            s = _clean(value)
-            if len(s) >= 40 and (key in CONTENT_KEYS or len(s) >= 300):
-                candidates.append(s)
 
     for xhr in getattr(page, "captured_xhr", []) or []:
         try:
@@ -170,21 +222,11 @@ def _extract_xhr_text(page: Any) -> str:
             body = getattr(xhr, "body", b"")
             if isinstance(body, bytes):
                 body = body.decode(getattr(xhr, "encoding", None) or "utf-8", errors="ignore")
-            walk(json.loads(body))
+            _collect_text_candidates(json.loads(body), candidates)
         except Exception:
             continue
 
-    seen: set[str] = set()
-    unique: list[str] = []
-    for text in sorted(candidates, key=len, reverse=True):
-        key = text[:240]
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(text)
-        if len(unique) >= 12:
-            break
-    return "\n\n".join(unique)
+    return _dedupe_candidates(candidates)
 
 
 def _result_from_page(url: str, page: Any, method: str, errors: list[str]) -> FetchResult:
@@ -195,20 +237,31 @@ def _result_from_page(url: str, page: Any, method: str, errors: list[str]) -> Fe
         errors.append(f"Markdown conversion failed: {type(exc).__name__}: {exc}")
         markdown = ""
 
-    # Always inspect captured XHR/fetch payloads when available. Dynamic sites often
-    # render only a teaser in the DOM while the full article lives in JSON.
-    xhr_text = _extract_xhr_text(page)
-    md_clean = _clean(markdown)
-    xhr_clean = _clean(xhr_text)
+    # Always inspect structured data exposed by the public page. Dynamic sites often
+    # render only a teaser in the visible DOM while full text exists in JSON-LD,
+    # RENDER_DATA, or XHR/fetch payloads.
+    structured = [
+        ("embedded", _extract_embedded_json_text(page)),
+        ("xhr", _extract_xhr_text(page)),
+    ]
+    current = markdown
+    current_method = method
 
-    if xhr_clean:
-        prefer_xhr = (
-            (_looks_truncated(md_clean) and not _looks_truncated(xhr_clean))
-            or len(xhr_clean) > max(len(md_clean) + 120, int(len(md_clean) * 1.35))
+    for suffix, candidate in structured:
+        cur_clean = _clean(current)
+        cand_clean = _clean(candidate)
+        if not cand_clean:
+            continue
+        prefer = (
+            (_looks_truncated(cur_clean) and not _looks_truncated(cand_clean))
+            or len(cand_clean) > max(len(cur_clean) + 120, int(len(cur_clean) * 1.35))
         )
-        if prefer_xhr and _quality(xhr_text):
-            markdown = xhr_text
-            method = f"{method}+xhr"
+        if prefer and _quality(candidate):
+            current = candidate
+            current_method = f"{method}+{suffix}"
+
+    markdown = current
+    method = current_method
 
     final_url = _clean(getattr(page, "url", "")) or url
 
