@@ -1,0 +1,100 @@
+name: Public Web Fetch
+
+on:
+  push:
+    paths:
+      - "requests/*.json"
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Public URL to fetch"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Scrapling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r scraper/requirements.txt
+          scrapling install
+
+      - name: Build request list
+        id: requests
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_URL: ${{ inputs.url }}
+        run: |
+          mkdir -p .runtime out
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            python - <<'PY'
+          import json, os
+          from pathlib import Path
+          url = os.environ["INPUT_URL"].strip()
+          p = Path(".runtime/manual-request.json")
+          p.write_text(json.dumps({"url": url, "requested_by": "workflow_dispatch"}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print(p)
+          PY
+            echo "files=.runtime/manual-request.json" >> "$GITHUB_OUTPUT"
+          else
+            files="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep -E '^requests/[^/]+\.json$' || true)"
+            if [ -z "$files" ]; then
+              echo "No request JSON changed in this commit."
+              echo "files=" >> "$GITHUB_OUTPUT"
+            else
+              printf '%s\n' "$files"
+              {
+                echo "files<<EOF"
+                printf '%s\n' "$files"
+                echo "EOF"
+              } >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Fetch public URLs
+        if: steps.requests.outputs.files != ''
+        env:
+          REQUEST_FILES: ${{ steps.requests.outputs.files }}
+        run: python scraper/process_requests.py
+
+      - name: Write run summary
+        if: always()
+        run: |
+          if [ -f out/manifest.md ]; then
+            cat out/manifest.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No fetch manifest was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload short-lived result
+        if: always() && steps.requests.outputs.files != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-fetch-${{ github.run_id }}
+          path: out/
+          retention-days: 1
+          if-no-files-found: warn
+
+      - name: Mark fetch failures
+        if: steps.requests.outputs.files != ''
+        run: python scraper/check_results.py
