@@ -45,16 +45,8 @@ jobs:
           INPUT_URL: ${{ inputs.url }}
         run: |
           mkdir -p .runtime out
-
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            python - <<'PY'
-          import json, os
-          from pathlib import Path
-          url = os.environ["INPUT_URL"].strip()
-          p = Path(".runtime/manual-request.json")
-          p.write_text(json.dumps({"url": url, "requested_by": "workflow_dispatch"}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-          print(p)
-          PY
+            python -c 'import json,os,pathlib; p=pathlib.Path(".runtime/manual-request.json"); p.write_text(json.dumps({"url":os.environ["INPUT_URL"].strip(),"requested_by":"workflow_dispatch"},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")'
             echo "files=.runtime/manual-request.json" >> "$GITHUB_OUTPUT"
           else
             files="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep -E '^requests/[^/]+\.json$' || true)"
