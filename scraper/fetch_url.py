@@ -187,25 +187,42 @@ def _dedupe_candidates(candidates: list[str]) -> str:
     return "\n\n".join(unique)
 
 
+def _walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+
 def _extract_toutiao_video(page: Any) -> dict[str, str]:
-    """Extract public Toutiao video metadata from the page's RENDER_DATA block."""
+    """Extract public Toutiao video metadata from RENDER_DATA without assuming one fixed schema."""
     try:
         raw = page.css('script#RENDER_DATA::text').get()
         if not raw:
             return {}
-        data = json.loads(urllib.parse.unquote(str(raw)))
-        root = data.get("data") or {}
-        video = root.get("initialVideo") or {}
-        item_cell = video.get("itemCell") or {}
-        user = item_cell.get("userInfo") or {}
-        play_info = video.get("videoPlayInfo") or {}
-        video_list = play_info.get("video_list") or {}
+        payload = json.loads(urllib.parse.unquote(str(raw)))
 
+        video: dict[str, Any] = {}
+        user: dict[str, Any] = {}
+        item_id = ""
+
+        for obj in _walk_dicts(payload):
+            if not item_id and obj.get("itemId"):
+                item_id = _clean(obj.get("itemId"))
+            if not video and isinstance(obj.get("videoPlayInfo"), dict):
+                video = obj
+            if not user and isinstance(obj.get("userInfo"), dict):
+                user = obj.get("userInfo") or {}
+
+        play_info = video.get("videoPlayInfo") if video else {}
         candidates: list[dict[str, Any]] = []
-        if isinstance(video_list, dict):
-            candidates = [v for v in video_list.values() if isinstance(v, dict)]
-        elif isinstance(video_list, list):
-            candidates = [v for v in video_list if isinstance(v, dict)]
+        if isinstance(play_info, dict):
+            for obj in _walk_dicts(play_info):
+                if obj.get("main_url") or obj.get("backup_url_1") or obj.get("backup_url"):
+                    candidates.append(obj)
 
         candidates.sort(
             key=lambda x: (
@@ -215,19 +232,41 @@ def _extract_toutiao_video(page: Any) -> dict[str, str]:
             ),
             reverse=True,
         )
+
         media_url = ""
         for item in candidates:
             url = item.get("main_url") or item.get("backup_url_1") or item.get("backup_url")
             if url:
-                media_url = str(url)
+                media_url = _clean(url)
                 break
 
+        cover_url = _clean(video.get("coverUrl") if video else "")
+        if not cover_url:
+            for obj in _walk_dicts(payload):
+                if obj.get("coverUrl"):
+                    cover_url = _clean(obj.get("coverUrl"))
+                    break
+
+        title = _clean(video.get("title") if video else "")
+        if not title:
+            for obj in _walk_dicts(payload):
+                if obj.get("title") and ("videoPlayInfo" in obj or "itemCell" in obj):
+                    title = _clean(obj.get("title"))
+                    break
+
+        author = _clean(user.get("name"))
+        if not author:
+            for obj in _walk_dicts(payload):
+                if isinstance(obj.get("userInfo"), dict) and obj["userInfo"].get("name"):
+                    author = _clean(obj["userInfo"].get("name"))
+                    break
+
         return {
-            "title": _clean(video.get("title")),
-            "author": _clean(user.get("name")),
-            "cover_url": _clean(video.get("coverUrl")),
-            "media_url": _clean(media_url),
-            "item_id": _clean(root.get("itemId")),
+            "title": title,
+            "author": author,
+            "cover_url": cover_url,
+            "media_url": media_url,
+            "item_id": item_id,
         }
     except Exception:
         return {}
