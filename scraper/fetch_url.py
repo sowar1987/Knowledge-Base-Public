@@ -121,12 +121,28 @@ def _metadata(page: Any) -> tuple[str, str, str]:
     return title, author, published
 
 
+def _looks_truncated(text: str) -> bool:
+    text = _clean(text)
+    if not text:
+        return True
+    tail = text[-80:]
+    return (
+        text.endswith("...")
+        or text.endswith("…")
+        or "..." in tail[-12:]
+        or "阅读全文" in tail
+        or "展开全文" in tail
+    )
+
+
 def _quality(markdown: str) -> bool:
     text = _clean(markdown)
     if len(text) < 160:
         return False
     lower = text.lower()
     if any(marker in lower for marker in BLOCK_MARKERS) and len(text) < 1200:
+        return False
+    if _looks_truncated(text):
         return False
     return True
 
@@ -179,9 +195,18 @@ def _result_from_page(url: str, page: Any, method: str, errors: list[str]) -> Fe
         errors.append(f"Markdown conversion failed: {type(exc).__name__}: {exc}")
         markdown = ""
 
-    if not _quality(markdown):
-        xhr_text = _extract_xhr_text(page)
-        if _quality(xhr_text):
+    # Always inspect captured XHR/fetch payloads when available. Dynamic sites often
+    # render only a teaser in the DOM while the full article lives in JSON.
+    xhr_text = _extract_xhr_text(page)
+    md_clean = _clean(markdown)
+    xhr_clean = _clean(xhr_text)
+
+    if xhr_clean:
+        prefer_xhr = (
+            (_looks_truncated(md_clean) and not _looks_truncated(xhr_clean))
+            or len(xhr_clean) > max(len(md_clean) + 120, int(len(md_clean) * 1.35))
+        )
+        if prefer_xhr and _quality(xhr_text):
             markdown = xhr_text
             method = f"{method}+xhr"
 
