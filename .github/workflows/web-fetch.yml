@@ -49,7 +49,7 @@ jobs:
             python -c 'import json,os,pathlib; p=pathlib.Path(".runtime/manual-request.json"); p.write_text(json.dumps({"url":os.environ["INPUT_URL"].strip(),"requested_by":"workflow_dispatch"},ensure_ascii=False,indent=2)+"\n",encoding="utf-8")'
             echo "files=.runtime/manual-request.json" >> "$GITHUB_OUTPUT"
           else
-            files="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep -E '^requests/[^/]+\.json$' || true)"
+            files="$(git diff-tree --no-commit-id --name-only --diff-filter=AM -r "$GITHUB_SHA" | grep -E '^requests/[^/]+\.json$' || true)"
             if [ -z "$files" ]; then
               echo "No request JSON changed in this commit."
               echo "files=" >> "$GITHUB_OUTPUT"
