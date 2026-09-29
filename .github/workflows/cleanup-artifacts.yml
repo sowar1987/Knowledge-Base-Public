@@ -1,0 +1,75 @@
+name: Cleanup Fetch Artifacts
+
+on:
+  push:
+    paths:
+      - "cleanup/*.json"
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find cleanup requests
+        id: requests
+        shell: bash
+        run: |
+          files="$(git diff-tree --no-commit-id --name-only --diff-filter=AM -r "$GITHUB_SHA" | grep -E '^cleanup/[^/]+\.json$' || true)"
+          if [ -z "$files" ]; then
+            echo "files=" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "files<<EOF"
+              printf '%s\n' "$files"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Delete artifacts
+        if: steps.requests.outputs.files != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_FILES: ${{ steps.requests.outputs.files }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          files=[pathlib.Path(x.strip()) for x in os.environ["REQUEST_FILES"].splitlines() if x.strip()]
+          repo=os.environ["GITHUB_REPOSITORY"]
+          for path in files:
+              data=json.loads(path.read_text(encoding="utf-8"))
+              ids=data.get("artifact_ids") or ([data["artifact_id"]] if data.get("artifact_id") else [])
+              for artifact_id in ids:
+                  print(f"Deleting artifact {artifact_id}")
+                  subprocess.run(
+                      ["gh","api","-X","DELETE",f"/repos/{repo}/actions/artifacts/{int(artifact_id)}"],
+                      check=False,
+                  )
+          PY
+
+      - name: Remove cleanup request files
+        if: steps.requests.outputs.files != ''
+        env:
+          REQUEST_FILES: ${{ steps.requests.outputs.files }}
+        shell: bash
+        run: |
+          printf '%s\n' "$REQUEST_FILES" | while IFS= read -r f; do
+            [ -n "$f" ] && git rm -- "$f"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: remove artifact cleanup requests [skip ci]"
+          git push
