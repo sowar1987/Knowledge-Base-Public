@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+
+import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,12 +25,58 @@ def safe_text(value: object) -> str:
     return "" if value is None else str(value)
 
 
+def download_images(result: dict, dest: Path) -> list[str]:
+    urls = list(result.get("images") or [])[:8]
+    if not urls:
+        return []
+
+    media_dir = dest / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Referer": result.get("final_url") or result.get("url") or "https://m.toutiao.com/",
+    }
+
+    for i, url in enumerate(urls, start=1):
+        try:
+            with httpx.Client(follow_redirects=True, timeout=20, headers=headers) as client:
+                with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    ctype = (response.headers.get("content-type") or "").lower()
+                    ext = ".jpg"
+                    if "png" in ctype:
+                        ext = ".png"
+                    elif "webp" in ctype:
+                        ext = ".webp"
+                    elif "gif" in ctype:
+                        ext = ".gif"
+
+                    path = media_dir / f"{i:02d}{ext}"
+                    total = 0
+                    with path.open("wb") as fh:
+                        for chunk in response.iter_bytes():
+                            total += len(chunk)
+                            if total > 12 * 1024 * 1024:
+                                raise ValueError("image exceeds 12 MiB limit")
+                            fh.write(chunk)
+                    saved.append(path.relative_to(dest).as_posix())
+        except Exception as exc:
+            result.setdefault("errors", []).append(
+                f"Image {i} download failed: {type(exc).__name__}: {exc}"
+            )
+    return saved
+
+
 def write_result(result: dict, index: int) -> dict:
     now = datetime.now(timezone.utc)
     key = hashlib.sha256(result["url"].encode()).hexdigest()[:12]
     dirname = f"{index:02d}-{safe_domain(result['url'])}-{key}"
     dest = OUT / dirname
     dest.mkdir(parents=True, exist_ok=True)
+
+    result["image_files"] = download_images(result, dest)
 
     (dest / "result.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n",
@@ -68,6 +116,7 @@ status: {"fetched" if result.get("ok") else "failed"}
 - Content type: {result.get("content_type") or "unknown"}
 - Verified complete: {bool(result.get("verified_complete"))}
 - Images: {len(result.get("images") or [])}
+- Downloaded image files: {", ".join(result.get("image_files") or []) or "none"}
 
 ## Fetch notes
 
