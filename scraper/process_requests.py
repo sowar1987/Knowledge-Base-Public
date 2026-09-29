@@ -65,6 +65,9 @@ status: {"fetched" if result.get("ok") else "failed"}
 - HTTP status: {safe_text(result.get("status_code")) or "unknown"}
 - Media URL: {result.get("media_url") or "unknown"}
 - Cover URL: {result.get("cover_url") or "unknown"}
+- Content type: {result.get("content_type") or "unknown"}
+- Verified complete: {bool(result.get("verified_complete"))}
+- Images: {len(result.get("images") or [])}
 
 ## Fetch notes
 
@@ -118,6 +121,9 @@ def main() -> None:
                 "markdown": "",
                 "media_url": "",
                 "cover_url": "",
+                "images": [],
+                "content_type": "unknown",
+                "verified_complete": False,
                 "errors": [f"{type(exc).__name__}: {exc}"],
                 "ok": False,
             }
