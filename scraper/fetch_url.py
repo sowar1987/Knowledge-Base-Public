@@ -465,7 +465,10 @@ def _fetch_toutiao_article(original_url: str, item_id: str, errors: list[str]) -
                 if extracted:
                     article_md = extracted
 
-            complete = len(_clean(article_md)) >= 100 and not _looks_truncated(article_md)
+            prose_only = re.sub(r"!\\[[^\\]]*\\]\\([^)]*\\)", " ", article_md)
+            prose_only = re.sub(r"https?://\\S+", " ", prose_only)
+            prose_chars = len(_clean(prose_only))
+            complete = prose_chars >= 100 and not _looks_truncated(article_md)
             if complete:
                 return FetchResult(
                     url=original_url,
